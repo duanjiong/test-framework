@@ -9,7 +9,8 @@ spec:
     - name: gobgp
       image: duanjiong/gobgp:latest
       ports:
-        - containerPort: 179
+        - containerPort: 17900
+  hostNetwork: true
 
 
 
