@@ -4,36 +4,19 @@ go 1.14
 
 require (
 	github.com/onsi/ginkgo v1.11.0
-	github.com/onsi/gomega v1.7.0
+	github.com/onsi/gomega v1.8.1
 	github.com/pkg/errors v0.8.1
 	github.com/spf13/viper v1.3.2
 	github.com/stretchr/testify v1.4.0
-	k8s.io/api v0.0.0
-	k8s.io/apiextensions-apiserver v0.0.0
-	k8s.io/apimachinery v0.0.0
+	k8s.io/api v0.18.2
+	k8s.io/apimachinery v0.18.2
 	k8s.io/apiserver v0.0.0
-	k8s.io/cli-runtime v0.0.0
-	k8s.io/client-go v0.0.0
-	k8s.io/cloud-provider v0.0.0
-	k8s.io/cluster-bootstrap v0.0.0
-	k8s.io/code-generator v0.0.0
+	k8s.io/client-go v0.18.2
 	k8s.io/component-base v0.0.0
-	k8s.io/cri-api v0.0.0
-	k8s.io/csi-translation-lib v0.0.0
 	k8s.io/klog v1.0.0
-	k8s.io/kube-aggregator v0.0.0
-	k8s.io/kube-controller-manager v0.0.0
-	k8s.io/kube-proxy v0.0.0
-	k8s.io/kube-scheduler v0.0.0
-	k8s.io/kubectl v0.0.0
-	k8s.io/kubelet v0.0.0
 	k8s.io/kubernetes v1.18.0
-	k8s.io/legacy-cloud-providers v0.0.0
-	k8s.io/metrics v0.0.0
-	k8s.io/sample-apiserver v0.0.0
-	k8s.io/sample-cli-plugin v0.0.0
-	k8s.io/sample-controller v0.0.0
 	k8s.io/utils v0.0.0-20200324210504-a9aa75ae1b89
+	sigs.k8s.io/controller-runtime v0.6.0
 )
 
 replace (

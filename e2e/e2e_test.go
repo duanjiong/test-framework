@@ -37,7 +37,7 @@ import (
 
 	// test sources
 	// kubesphere e2e tests add here
-	_ "github.com/duanjiong/test-framework/e2e/porter"
+	_ "github.com/duanjiong/test-framework/e2e/network"
 )
 
 var viperConfig = flag.String("viper-config", "", "The name of a viper config file (https://github.com/spf13/viper#what-is-viper). All e2e command line parameters can also be configured in such a file. May contain a path and may or may not contain the file suffix. The default is to look for an optional file with `e2e` as base name. If a file is specified explicitly, it must be present.")
@@ -79,6 +79,8 @@ func TestMain(m *testing.M) {
 	if framework.TestContext.RepoRoot != "" {
 		testfiles.AddFileSource(testfiles.RootFileSource{Root: framework.TestContext.RepoRoot})
 	}
+
+	//kubesphere add go bindata here
 
 	rand.Seed(time.Now().UnixNano())
 	os.Exit(m.Run())

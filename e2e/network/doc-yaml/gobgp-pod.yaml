@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gobgp
+  labels:
+    app: gobgp-porter
+spec:
+  containers:
+    - name: gobgp
+      image: duanjiong/gobgp:latest
+      ports:
+        - containerPort: 179
+
+
+
