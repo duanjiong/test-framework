@@ -10,6 +10,10 @@ spec:
       image: duanjiong/gobgp:latest
       ports:
         - containerPort: 17900
+      command:
+        - /usr/local/bin/gobgpd
+      args:
+          - --api-hosts=:50052
   hostNetwork: true
 
 
