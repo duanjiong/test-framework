@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"github.com/golang/protobuf/ptypes"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"net"
 	"time"
@@ -34,7 +35,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/authentication/serviceaccount"
 	clientset "k8s.io/client-go/kubernetes"
@@ -51,35 +51,36 @@ import (
 const (
 	PorterNamespace = "porter-testns"
 	PorterGrpcPort  = 50051
-	GoBgpGrpcPort   = "50052"
+	GoBgpGrpcPort   = 50052
 	GoBgpPort       = 17900
 	GoBgpAS         = 65000
 	PorterBgpAS     = 65001
 	PorterBgpPort   = 17901
 	PorterRouterID  = "8.8.8.8"
+	defaultTime     = 120
 )
 
 type bgpTestGlobal struct {
-	porterManagerPod *v1.Pod
-	as               uint32
-	listenPort       int32
-	name             string
-	porterClient     client.Client
+	as           uint32
+	listenPort   int32
+	routerID     string
+	name         string
+	porterClient client.Client
 }
 
-func (global *bgpTestGlobal) Create() {
+func (global *bgpTestGlobal) Create() error {
 	bgpxxx := &porterapi.BgpConf{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: global.name,
 		},
 		Spec: porterapi.BgpConfSpec{
 			As:       global.as,
-			RouterId: PorterRouterID,
+			RouterId: global.routerID,
 			Port:     global.listenPort,
 		},
 	}
 
-	framework.ExpectNoError(global.porterClient.Create(context.TODO(), bgpxxx))
+	return global.porterClient.Create(context.TODO(), bgpxxx)
 }
 
 func (global *bgpTestGlobal) Delete() {
@@ -97,6 +98,7 @@ func (global *bgpTestGlobal) Update(listenPort int32) {
 
 	framework.ExpectNoError(global.porterClient.Get(context.TODO(), client.ObjectKey{Name: global.name}, bgpxxx))
 
+	bgpxxx.Spec.Port = listenPort
 	global.listenPort = listenPort
 
 	framework.ExpectNoError(global.porterClient.Update(context.TODO(), bgpxxx))
@@ -146,23 +148,18 @@ func (peer *bgpTestPeer) Update() {
 	for i := 0; i < 3; i++ {
 		bgppeer := &porterapi.BgpPeer{}
 		framework.ExpectNoError(peer.porterClient.Get(context.TODO(), client.ObjectKey{Name: peer.name}, bgppeer))
-
-		bgppeer = &porterapi.BgpPeer{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: peer.name,
+		framework.Logf("bgppeer %v", bgppeer)
+		bgppeer.Spec = porterapi.BgpPeerSpec{
+			Config: porterapi.NeighborConfig{
+				PeerAs:          peer.as,
+				NeighborAddress: peer.address,
 			},
-			Spec: porterapi.BgpPeerSpec{
-				Config: porterapi.NeighborConfig{
-					PeerAs:          peer.as,
-					NeighborAddress: peer.address,
-				},
-				AddPaths: porterapi.AddPaths{SendMax: 8},
-				Transport: porterapi.Transport{
-					RemotePort:  peer.port,
-					PassiveMode: peer.passive,
-				},
-				UsingPortForward: peer.forward,
+			AddPaths: porterapi.AddPaths{SendMax: 8},
+			Transport: porterapi.Transport{
+				RemotePort:  peer.port,
+				PassiveMode: peer.passive,
 			},
+			UsingPortForward: peer.forward,
 		}
 
 		err := peer.porterClient.Update(context.TODO(), bgppeer)
@@ -180,10 +177,10 @@ type gobgpClient struct {
 	cancle context.CancelFunc
 }
 
-func newGobgpClient(ctx context.Context, pod *v1.Pod) *gobgpClient {
+func newGobgpClient(ctx context.Context, pod *v1.Pod, port int) *gobgpClient {
 	grpcOpts := []grpc.DialOption{grpc.WithBlock()}
 	grpcOpts = append(grpcOpts, grpc.WithInsecure())
-	target := pod.Status.PodIP + ":" + GoBgpGrpcPort
+	target := pod.Status.PodIP + ":" + fmt.Sprintf("%d", port)
 	cc, cancel := context.WithTimeout(ctx, time.Second)
 	conn, err := grpc.DialContext(cc, target, grpcOpts...)
 	if err != nil {
@@ -292,6 +289,7 @@ func (client *gobgpClient) addPeerForGobgp(address string, as uint32, port int) 
 			},
 			Transport: &gobgpapi.Transport{
 				RemotePort: uint32(port),
+				//PassiveMode: true,
 			},
 		}})
 	framework.ExpectNoError(err)
@@ -319,6 +317,7 @@ func getFamily(ip string) *gobgpapi.Family {
 	return family
 }
 
+//TODO find master porter-manager, now only support one pod
 func findActivePorterManager(c clientset.Interface) *v1.Pod {
 
 	pods, err := c.CoreV1().Pods(PorterNamespace).List(context.TODO(), metav1.ListOptions{
@@ -350,6 +349,8 @@ var _ = KubesphereDescribe("[Porter:BGP]", func() {
 	var porterClient client.Client
 	var ns string
 	var gobgpPod *v1.Pod
+	var porterBgpClient *gobgpClient
+
 	ginkgo.BeforeEach(func() {
 		c = f.ClientSet
 		ns = f.Namespace.Name
@@ -366,6 +367,8 @@ var _ = KubesphereDescribe("[Porter:BGP]", func() {
 
 		//get porter-manager
 		porterManagerPod = findActivePorterManager(c)
+		porterBgpClient = newGobgpClient(context.TODO(), porterManagerPod, PorterGrpcPort)
+		framework.ExpectNoError(err)
 
 		// this test wants powerful permissions.  Since the namespace names are unique, we can leave this
 		// lying around so we don't have to race any caches
@@ -380,7 +383,6 @@ var _ = KubesphereDescribe("[Porter:BGP]", func() {
 	})
 
 	framework.ConformanceIt("BgpConf", func() {
-		ginkgo.By("setup gobgp pod")
 		test := "/root/test-framework/e2e/network/doc-yaml/"
 		podYaml := readFile(test, "gobgp-pod.yaml")
 		nsFlag := fmt.Sprintf("--namespace=%v", ns)
@@ -391,20 +393,23 @@ var _ = KubesphereDescribe("[Porter:BGP]", func() {
 		framework.ExpectNoError(err)
 		gobgpPod, err = c.CoreV1().Pods(ns).Get(context.TODO(), podName, metav1.GetOptions{})
 		framework.ExpectNoError(err)
-		bgpClient := newGobgpClient(context.TODO(), gobgpPod)
+		bgpClient := newGobgpClient(context.TODO(), gobgpPod, GoBgpGrpcPort)
 		framework.ExpectNoError(err)
 		bgpClient.addConfForGobgp(gobgpPod)
 
-		ginkgo.By("add bgpconf")
-		bgpconf := &bgpTestGlobal{
-			porterManagerPod: porterManagerPod,
-			as:               PorterBgpAS,
-			listenPort:       int32(PorterBgpPort),
-			name:             "test-bgpconf",
-			porterClient:     porterClient,
+		ginkgo.By("add Eip")
+		eip := &porterapi.Eip{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-eip",
+			},
+			Spec: porterapi.EipSpec{
+				Address: "192.168.99.10-192.168.99.11",
+			},
 		}
-		bgpconf.Create()
-		defer bgpconf.Delete()
+		framework.ExpectNoError(porterClient.Create(context.TODO(), eip))
+		defer func() {
+			framework.ExpectNoError(porterClient.Delete(context.TODO(), eip))
+		}()
 
 		ginkgo.By("add bgppeer")
 		bgppeer := &bgpTestPeer{
@@ -413,28 +418,28 @@ var _ = KubesphereDescribe("[Porter:BGP]", func() {
 			port:         GoBgpPort,
 			name:         "test-peer",
 			porterClient: porterClient,
-			passive:      false,
-			forward:      false,
+			passive:      false, //test for passive
+			forward:      true,  //test for port forward
 		}
 		bgppeer.Create()
 		defer bgppeer.Delete()
 
+		ginkgo.By("test bgpconf")
+		bgpconf := &bgpTestGlobal{
+			as:           PorterBgpAS,
+			listenPort:   int32(PorterBgpPort),
+			name:         "test-bgpconf",
+			porterClient: porterClient,
+			routerID:     "111111",
+		}
+		ginkgo.By("check bgpconf ip")
+		//framework.ExpectError(bgpconf.Create())
+		bgpconf.routerID = PorterRouterID
+		framework.ExpectNoError(bgpconf.Create())
+		defer bgpconf.Delete()
+
 		ginkgo.By("add gobgp peer, port 179 for test port-forward")
 		bgpClient.addPeerForGobgp(porterManagerPod.Status.PodIP, PorterBgpAS, 179)
-
-		ginkgo.By("add Eip")
-		eip := &porterapi.Eip{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "test-eip",
-			},
-			Spec: porterapi.EipSpec{
-				Address: "192.168.99.0/24",
-			},
-		}
-		framework.ExpectNoError(porterClient.Create(context.TODO(), eip))
-		defer func() {
-			framework.ExpectNoError(porterClient.Delete(context.TODO(), eip))
-		}()
 
 		ginkgo.By("add service")
 		tcpJig := e2eservice.NewTestJig(c, ns, "test-service")
@@ -452,22 +457,78 @@ var _ = KubesphereDescribe("[Porter:BGP]", func() {
 		})
 
 		framework.ExpectNoError(err)
-		tcpservice, err := tcpJig.WaitForLoadBalancer(30 * time.Second)
+		tcpservice, err := tcpJig.WaitForLoadBalancer(defaultTime * time.Second)
 		framework.ExpectNoError(err)
 		framework.Logf("ingress %v", tcpservice.Status.LoadBalancer.Ingress)
 
-		framework.ExpectNoError(waitForRouterNum(30*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, int(*rc.Spec.Replicas)))
+		num := int(*rc.Spec.Replicas)
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, num))
 
 		tcpJig.Scale(1)
-		framework.ExpectNoError(waitForRouterNum(30*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 1))
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 1))
+
+		ginkgo.By("add bgppeer twice should have no problem")
+		bgppeer2 := &bgpTestPeer{
+			address:      "9.9.9.9",
+			as:           GoBgpAS + 1,
+			port:         GoBgpPort + 1,
+			name:         "test-peer2",
+			porterClient: porterClient,
+			passive:      false, //test for passive
+			forward:      true,  //test for port forward
+		}
+		bgppeer2.Create()
+		defer bgppeer2.Delete()
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 1))
+
+		ginkgo.By("update bgp peer should have no prolem")
+		bgppeer.port = GoBgpPort + 1
+		bgppeer.Update()
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 0))
+		ginkgo.By("restore bgp peer")
+		bgppeer.port = GoBgpPort
+		bgppeer.Update()
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 1))
+		porterBgpClient.client.GetBgp(context.TODO(), &gobgpapi.GetBgpRequest{})
+
+		ginkgo.By("update bgpconf should have no problem")
+		bgpconf.Update(PorterBgpPort + 1)
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 0))
+		ginkgo.By("restore bgpconf")
+		bgpconf.Update(PorterBgpPort)
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 1))
+
+		ginkgo.By("add bgpconf twice should have no problem")
+		bgpconf2 := &bgpTestGlobal{
+			as:           PorterBgpAS,
+			listenPort:   int32(PorterBgpPort),
+			name:         "test-bgpconf2",
+			porterClient: porterClient,
+			routerID:     PorterRouterID,
+		}
+		bgpconf2.Create()
+		defer bgpconf2.Delete()
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 1))
+
+		ginkgo.By("check eip status")
+		porterClient.Get(context.TODO(), client.ObjectKey{Namespace: eip.Namespace, Name: eip.Name}, eip)
+		framework.ExpectEqual(eip.Status, porterapi.EipStatus{
+			Occupied: false,
+			Usage:    1,
+			PoolSize: 2,
+		})
+
+		tcpJig.Scale(0)
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 0))
+
+		tcpJig.Scale(1)
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 1))
 
 		//graceful shutdown
+		ginkgo.By("graceful shutdown")
 		c.CoreV1().Pods(PorterNamespace).Delete(context.TODO(), porterManagerPod.Name, metav1.DeleteOptions{})
-		time.Sleep(10 * time.Second)
-		framework.ExpectNoError(waitForRouterNum(30*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 1))
-		framework.ExpectNoError(waitForRouterNum(65*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 0))
-
-		//TODO   api validation
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 1))
+		framework.ExpectNoError(waitForRouterNum(defaultTime*time.Second, tcpservice.Status.LoadBalancer.Ingress[0].IP, bgpClient, 0))
 	})
 })
 

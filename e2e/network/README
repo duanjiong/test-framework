@@ -1,0 +1,4 @@
+export KUBECONFIG=/path/to/kubeconfig
+
+ginkgo -focus=layer2
+ginkgo -focus=BGP

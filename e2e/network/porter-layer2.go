@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	Layer2Addr = "172.22.0.99-172.22.0.150"
+	Layer2Addr = "172.22.0.100-172.22.0.131"
 )
 
 var _ = KubesphereDescribe("[Porter:layer2]", func() {
@@ -64,20 +64,79 @@ var _ = KubesphereDescribe("[Porter:layer2]", func() {
 				Name: "test-eip",
 			},
 			Spec: porterapi.EipSpec{
-				Address: Layer2Addr,
+				Address:  Layer2Addr,
 				Protocol: constant.PorterProtocolLayer2,
 			},
 		}
 		framework.ExpectNoError(porterClient.Create(context.TODO(), eip))
 		defer func() {
-			framework.ExpectNoError(porterClient.Delete(context.TODO(), eip))
+			porterClient.Delete(context.TODO(), eip)
 		}()
 
 		ginkgo.By("add service")
-		tcpJig := e2eservice.NewTestJig(c, ns, "test-service")
+		for i := 0; i < 10; i++ {
+			framework.Logf("create service %d", i)
+			tcpJig := e2eservice.NewTestJig(c, ns, "test-service"+fmt.Sprintf("%d", i))
+			_, err := tcpJig.CreateTCPService(nil)
+			tcpJig.Run(nil)
+			framework.ExpectNoError(err)
+			_, err = tcpJig.UpdateService(func(s *v1.Service) {
+				s.Spec.Type = v1.ServiceTypeLoadBalancer
+				if s.ObjectMeta.Annotations == nil {
+					s.ObjectMeta.Annotations = map[string]string{}
+				}
+				s.Annotations[constant.PorterAnnotationKey] = constant.PorterAnnotationValue
+				s.Annotations[constant.PorterProtocolAnnotationKey] = constant.PorterProtocolLayer2
+				if i==1 {
+					ginkgo.By("test special eip in annotation")
+					s.Annotations[constant.PorterEIPAnnotationKey] = "172.22.0.103"
+				}
+				if i==2 {
+					ginkgo.By("test special eip in LoadBalancerIP")
+					s.Spec.LoadBalancerIP = "172.22.0.101"
+				}
+			})
+
+			framework.ExpectNoError(err)
+			tcpservice, err := tcpJig.WaitForLoadBalancer(30 * time.Second)
+			framework.ExpectNoError(err)
+			framework.Logf("ingress %v", tcpservice.Status.LoadBalancer.Ingress)
+
+			dest := fmt.Sprintf("%s:%d", tcpservice.Status.LoadBalancer.Ingress[0].IP, tcpservice.Spec.Ports[0].Port)
+			framework.Logf("access %v", dest)
+			_, err = net.Dial("tcp4", dest)
+			framework.ExpectNoError(err)
+		}
+		ginkgo.By("check eip status")
+		time.Sleep(10 *time.Second) //wait eip status sync
+		porterClient.Get(context.TODO(), client.ObjectKey{Namespace: eip.Namespace, Name: eip.Name}, eip)
+		framework.ExpectEqual(eip.Status, porterapi.EipStatus{
+			Occupied: false,
+			Usage:    10,
+			PoolSize: 32,
+		})
+
+
+		ginkgo.By("check eip protocol")
+		eip2 := &porterapi.Eip{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-eip2",
+			},
+			Spec: porterapi.EipSpec{
+				Address:  Layer2Addr,
+				Protocol: "xxxx",
+			},
+		}
+		framework.ExpectError(porterClient.Create(context.TODO(), eip2))
+
+
+		ginkgo.By("change eip address")
+		porterClient.Get(context.TODO(), client.ObjectKey{Namespace: eip.Namespace, Name: eip.Name}, eip)
+		eip.Spec.Address = "172.22.0.200-172.22.0.250"
+		framework.ExpectNoError(porterClient.Update(context.TODO(), eip))
+		tcpJig := e2eservice.NewTestJig(c, ns, "test-service"+fmt.Sprintf("%d", 11))
 		_, err := tcpJig.CreateTCPService(nil)
-		framework.ExpectNoError(err)
-		_, err = tcpJig.Run(tcpJig.AddRCAntiAffinity)
+		tcpJig.Run(nil)
 		framework.ExpectNoError(err)
 		_, err = tcpJig.UpdateService(func(s *v1.Service) {
 			s.Spec.Type = v1.ServiceTypeLoadBalancer
@@ -87,14 +146,17 @@ var _ = KubesphereDescribe("[Porter:layer2]", func() {
 			s.Annotations[constant.PorterAnnotationKey] = constant.PorterAnnotationValue
 			s.Annotations[constant.PorterProtocolAnnotationKey] = constant.PorterProtocolLayer2
 		})
-
-		framework.ExpectNoError(err)
 		tcpservice, err := tcpJig.WaitForLoadBalancer(30 * time.Second)
+		framework.Logf("test service 11 len %v", tcpservice.Status.LoadBalancer)
 		framework.ExpectNoError(err)
-		framework.Logf("ingress %v", tcpservice.Status.LoadBalancer.Ingress)
 
-		_, err = net.Dial("tcp4", fmt.Sprintf("%s:%d",tcpservice.Status.LoadBalancer.Ingress[0].IP,tcpservice.Spec.Ports[0].Port))
+		pod := findActivePorterManager(c)
+		c.CoreV1().Pods(PorterNamespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+		tcpservice, err = tcpJig.WaitForLoadBalancerDestroy("", 0, 120*time.Second)
 		framework.ExpectNoError(err)
+		framework.Logf("test service 11 %v", tcpservice.Status.LoadBalancer)
+
+		porterClient.Delete(context.TODO(), eip)
 	})
 
 })

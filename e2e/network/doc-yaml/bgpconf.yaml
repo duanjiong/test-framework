@@ -5,5 +5,5 @@ metadata:
 spec:
   # Add fields here
   as : 65000
-  routerID : 192.168.0.2
+  routerID : 192.168.0.2--
   port: 17900
